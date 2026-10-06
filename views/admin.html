@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Administração — Central de Tickets</title><link rel="stylesheet" href="/estilo.css"></head><body><main>
+<header><div><h1>Painel administrativo</h1><p class="sub" id="ult">Carregando...</p></div>
+<div class="hr"><a class="btn p" href="/">Visualizar Dashboard</a><button class="btn" id="out">Sair</button></div></header>
+<div class="panel"><h2>Atualizar dashboard</h2><p class="sub">Envie as três planilhas. Os dados atuais só são substituídos se as três forem válidas.</p>
+<div class="grid" id="cards"></div><button class="btn p" id="go" disabled>Atualizar Dashboard</button><div id="res" style="margin-top:16px"></div></div>
+<div class="panel" style="margin-top:20px"><h2>Usuários</h2>
+<form class="f row" id="uf"><div><label>Nome</label><input id="un" required></div><div><label>Login</label><input id="ul" required></div>
+<div><label>Senha (mín. 8)</label><input id="us" type="password" minlength="8" required autocomplete="new-password"></div>
+<div><label>Perfil</label><select id="up"><option value="USUARIO">Usuário (só dashboard)</option><option value="ADMIN">Administrador</option></select></div>
+<div style="flex:0"><button class="btn p">Cadastrar</button></div></form><div id="umsg"></div>
+<div class="tw" style="margin-top:14px"><table><thead><tr><th>Nome</th><th>Login</th><th>Perfil</th><th></th></tr></thead><tbody id="ut"></tbody></table></div></div>
+</main><script>
+const $ = s => document.querySelector(s), esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const NOMES = {f1:'📄 Fase 1', f2:'📄 Fase 2', sv:'📄 Tickets por Serviço'}, F = {};
+async function api(u, o){ const r = await fetch(u, o), j = await r.json().catch(() => ({}));
+  if (r.status === 401) location.href = '/login'; if (!r.ok) throw Object.assign(new Error(j.erro || 'Erro'), {j}); return j; }
+const json = (m, b) => ({method:m, headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
+const quando = d => d ? new Date(d).toLocaleString('pt-BR') : null;
+$('#out').onclick = async () => { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; };
+
+function cards(){
+  $('#cards').innerHTML = Object.keys(NOMES).map(k => `<div class="panel"><h3 style="margin:0 0 12px;font-size:16px">${NOMES[k]}</h3>` + (F[k]
+    ? `<div class="file"><div><b>${esc(F[k].name)}</b><small>${(F[k].size / 1024).toFixed(1)} KB</small></div><button class="link" data-rm="${k}">Remover</button></div><span class="st">✓ Selecionado</span>`
+    : `<label class="drop" data-k="${k}"><input type="file" accept=".xlsx,.xls,.csv" data-k="${k}">Arraste ou selecione o arquivo</label>`) + '</div>').join('');
+  document.querySelectorAll('input[type=file]').forEach(i => i.onchange = () => { F[i.dataset.k] = i.files[0]; cards(); });
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { delete F[b.dataset.rm]; cards(); });
+  document.querySelectorAll('.drop').forEach(d => { d.ondragover = e => { e.preventDefault(); d.classList.add('over'); }; d.ondragleave = () => d.classList.remove('over');
+    d.ondrop = e => { e.preventDefault(); if (e.dataTransfer.files[0]) { F[d.dataset.k] = e.dataTransfer.files[0]; cards(); } }; });
+  $('#go').disabled = Object.keys(NOMES).some(k => !F[k]);
+}
+async function info(){ const i = await api('/api/admin/info'); $('#ult').textContent = i.atualizadoEm ? `Última atualização: ${quando(i.atualizadoEm)} (por ${i.atualizadoPor})` : 'Nenhuma importação realizada ainda.'; }
+$('#go').onclick = async () => {
+  const b = $('#go'), fd = new FormData(); Object.keys(NOMES).forEach(k => fd.append(k, F[k]));
+  b.disabled = true; b.textContent = 'Processando...'; $('#res').innerHTML = '';
+  try {
+    const j = await api('/api/admin/atualizar', {method:'POST', body:fd});
+    $('#res').innerHTML = `<div class="ok"><span>✓ Dados atualizados com sucesso — ${j.clientes} clientes, ${j.tickets} tickets de serviço, ${j.servicos} serviços (${quando(j.atualizadoEm)})</span></div>` +
+      (j.avisos.length ? `<div class="warn"><b>Pontos de atenção:</b><ul>${j.avisos.map(a => `<li>${esc(a)}</li>`).join('')}</ul></div>` : '') + '<a class="btn p" href="/">Visualizar Dashboard</a>';
+    info();
+  } catch(e){ $('#res').innerHTML = `<div class="msg">${esc(e.message)}<br>Os dados anteriores foram mantidos.</div>`; }
+  b.textContent = 'Atualizar Dashboard'; cards();
+};
+async function usuarios(){
+  const l = await api('/api/admin/usuarios');
+  $('#ut').innerHTML = l.map(u => `<tr><td>${esc(u.nome)}</td><td>${esc(u.login)}</td><td>${u.perfil === 'ADMIN' ? 'Administrador' : 'Usuário'}</td>
+    <td style="text-align:right"><button class="link" data-s="${u.id}">Redefinir senha</button> · <button class="link" data-d="${u.id}" data-n="${esc(u.login)}">Excluir</button></td></tr>`).join('');
+  document.querySelectorAll('[data-s]').forEach(b => b.onclick = async () => { const s = prompt('Nova senha (mínimo 8 caracteres):'); if (s) try { await api(`/api/admin/usuarios/${b.dataset.s}/senha`, json('POST', {senha:s})); alert('Senha alterada.'); } catch(e){ alert(e.message); } });
+  document.querySelectorAll('[data-d]').forEach(b => b.onclick = async () => { if (confirm(`Excluir o usuário ${b.dataset.n}?`)) try { await api('/api/admin/usuarios/' + b.dataset.d, {method:'DELETE'}); usuarios(); } catch(e){ alert(e.message); } });
+}
+$('#uf').onsubmit = async e => { e.preventDefault(); $('#umsg').innerHTML = '';
+  try { await api('/api/admin/usuarios', json('POST', {nome:$('#un').value, login:$('#ul').value, senha:$('#us').value, perfil:$('#up').value})); $('#uf').reset(); usuarios(); }
+  catch(err){ $('#umsg').innerHTML = '<div class="msg"></div>'; $('#umsg').firstChild.textContent = err.message; } };
+cards(); info(); usuarios();
+</script></body></html>

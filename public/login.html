@@ -1,0 +1,24 @@
+<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entrar — Central de Tickets</title><link rel="stylesheet" href="/estilo.css"></head><body>
+<main class="auth"><div class="panel"><h1 style="font-size:22px">Central de Tickets</h1><p class="sub" id="sub"></p>
+<form class="f" id="f"><div id="extra" hidden><label>Nome</label><input id="nome" autocomplete="name"></div>
+<label>Login</label><input id="login" autocomplete="username" required>
+<label>Senha</label><input id="senha" type="password" autocomplete="current-password" required>
+<div id="conf" hidden><label>Confirmar senha</label><input id="senha2" type="password" autocomplete="new-password"></div>
+<div id="msg"></div><button class="btn p" id="ok" style="width:100%;margin-top:16px">Entrar</button></form></div></main>
+<script>
+const $ = s => document.querySelector(s); let setup = false;
+fetch('/api/status').then(r => r.json()).then(s => {
+  setup = s.precisaSetup;
+  $('#sub').textContent = setup ? 'Primeiro acesso: crie o administrador do sistema.' : 'Entre com seu usuário e senha.';
+  $('#extra').hidden = $('#conf').hidden = !setup; if (setup) { $('#ok').textContent = 'Criar administrador'; $('#senha').autocomplete = 'new-password'; }
+});
+$('#f').onsubmit = async e => {
+  e.preventDefault(); const m = $('#msg'); m.innerHTML = '';
+  if (setup && $('#senha').value !== $('#senha2').value) { m.innerHTML = '<div class="msg">As senhas não conferem.</div>'; return; }
+  const r = await fetch(setup ? '/api/setup' : '/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({nome:$('#nome').value, login:$('#login').value, senha:$('#senha').value})});
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) location.href = '/'; else m.innerHTML = '<div class="msg"></div>', m.firstChild.textContent = j.erro || 'Erro ao entrar.';
+};
+</script></body></html>

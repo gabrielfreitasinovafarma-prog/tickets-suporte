@@ -1,0 +1,13 @@
+[Unit]
+Description=Central de Tickets
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/central-tickets
+ExecStart=/usr/bin/node src/server.js
+Environment=PORT=3000
+Restart=always
+User=tickets
+
+[Install]
+WantedBy=multi-user.target

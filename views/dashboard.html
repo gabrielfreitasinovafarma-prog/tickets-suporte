@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Central de Tickets</title>
+<link rel="stylesheet" href="/estilo.css">
+<script src="/vendor/exceljs.min.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Central de Tickets</h1><p class="sub">Visão geral das implantações e tickets</p></div>
+    <div class="hr"><span class="upd" id="upd" hidden></span>
+      <a class="btn" id="btnNew" href="/admin" hidden>Nova importação</a>
+      <button class="btn" id="btnOut">Sair</button>
+      <button class="btn p" id="btnExp" hidden>↓ Exportar Excel</button></div>
+  </header>
+  <div id="toast"></div>
+  <section id="v-empty" class="panel empty"><h2>Nenhum dado carregado</h2><p>Importe suas 3 planilhas para visualizar o dashboard.</p><button class="btn p" id="btnImp">Importar planilhas</button></section>
+
+  <section id="v-dash" hidden></section>
+</main>
+<div id="modal" class="mod" hidden></div>
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const fmt = n => Number(n).toLocaleString('pt-BR');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function normTexto(s){ return String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+/* ---------- Exportação ---------- */
+async function exportarExcel(cons, res){
+  const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet('Consolidado');
+  const head = ['CNPJ','Nome da organização','Fase','Responsável Fase 1','Tickets Fase 1','Responsável Fase 2','Tickets Fase 2','Total de Tickets', ...cons.servicos];
+  ws.addRow(head);
+  cons.linhas.concat(cons.foraFases || []).forEach(l => ws.addRow([l.cnpj, l.nome, l.fase, l.r1, l.t1, l.r2, l.t2, l.total, ...l.srv]));
+  estilizar(ws, head, 1);
+  ws.getColumn(1).numFmt = '@';
+  for (let c = 5; c <= head.length; c++) if (c !== 6){ ws.getColumn(c).numFmt = '#,##0.##'; ws.getColumn(c).alignment = {horizontal:'right'}; }
+  ws.views = [{state:'frozen', ySplit:1}];
+  ws.autoFilter = {from:{row:1, column:1}, to:{row:1 + cons.linhas.length + (cons.foraFases || []).length, column:head.length}};
+
+  const rs = wb.addWorksheet('Resumo');
+  rs.addRows([['Resumo da consolidação',''],['Total de clientes',res.total],['Clientes Fase 1',res.c1],['Clientes Fase 2',res.c2],['Clientes nas duas fases',res.ambas],
+    ['Total de tickets Fase 1',res.t1],['Total de tickets Fase 2',res.t2],['Total geral de tickets',res.geral],[],['Serviço','Tickets'], ...res.porSrv.map(s => [s.nome, s.tickets])]);
+  rs.getRow(1).font = {bold:true, size:14};
+  for (let r = 2; r <= 8; r++) rs.getCell(r, 1).font = {bold:true};
+  estilizar(rs, ['Serviço','Tickets'], 10);
+  rs.getColumn(1).width = 34; rs.getColumn(2).width = 14;
+  rs.getColumn(2).numFmt = '#,##0.##'; rs.getColumn(2).alignment = {horizontal:'right'};
+
+  const buf = await wb.xlsx.writeBuffer();
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  a.download = `Consolidado_Tickets_${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()}.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function estilizar(ws, head, rowNum){
+  const r = ws.getRow(rowNum);
+  r.eachCell(c => {
+    c.font = {bold:true, color:{argb:'FFFFFFFF'}};
+    c.fill = {type:'pattern', pattern:'solid', fgColor:{argb:'FF1F3A5F'}};
+    c.alignment = {vertical:'middle', horizontal:'center', wrapText:true};
+  });
+  r.height = 32;
+  head.forEach((h, i) => {
+    if (ws.name === 'Resumo') return;
+    let w = String(h).length;
+    ws.getColumn(i + 1).eachCell({includeEmpty:false}, c => { w = Math.max(w, String(c.value ?? '').length); });
+    ws.getColumn(i + 1).width = Math.min(Math.max(w + 3, 12), 60);
+  });
+}
+
+/* ---------- Interface ---------- */
+let D = null, svcSel = null, TODOS = [];
+const resp = l => [l.r1, l.r2].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' / ');
+const dtfmt = d => d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'});
+function show(v){
+  $('#v-empty').hidden = v !== 'empty'; $('#v-dash').hidden = v !== 'dash';
+  $('#btnExp').hidden = !D; $('#upd').hidden = !D;
+}
+$('#btnExp').onclick = () => exportarExcel(D.cons, D.res);
+$('#btnOut').onclick = async () => { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; };
+$('#btnImp').onclick = () => { location.href = '/admin'; };
+async function iniciar(){
+  try {
+    const m = await fetch('/api/me');
+    if (m.status === 401){ location.href = '/login'; return; }
+    const adm = (await m.json()).perfil === 'ADMIN';
+    $('#btnNew').hidden = !adm; $('#btnImp').hidden = !adm;
+    if (!adm) $('#v-empty p').textContent = 'Aguarde o administrador importar as planilhas.';
+    const r = await fetch('/api/dados');
+    if (r.status === 404){ show('empty'); return; }
+    if (!r.ok) throw new Error();
+    const j = await r.json();
+    D = {cons:j.cons, res:j.res, avisos:j.avisos, ts:new Date(j.atualizadoEm)};
+    renderDash(); show('dash');
+  } catch(e){ show('empty'); $('#v-empty h2').textContent = 'Erro ao carregar os dados'; }
+}
+
+function renderDash(){
+  const {cons, res, avisos, ts} = D, L = cons.linhas, tsv = res.porSrv.reduce((a, x) => a + x.tickets, 0);
+  TODOS = L.concat(cons.foraFases || []);
+  $('#upd').textContent = 'Última atualização: ' + dtfmt(ts);
+  // tickets por responsável (Fase 1 x Fase 2)
+  const rp = new Map();
+  L.forEach(l => {
+    const f = l._b ? 'f2' : 'f1', n = (l._b ? l.r2 : l.r1) || '(sem responsável)', r = rp.get(n) || {f1:0, f2:0};
+    r[f] += l._s; rp.set(n, r);
+  });
+  const rlist = [...rp].sort((a, b) => (b[1].f1 + b[1].f2) - (a[1].f1 + a[1].f2));
+  const rmax = Math.max(1, ...rlist.map(r => Math.max(r[1].f1, r[1].f2)));
+  const smax = Math.max(1, ...res.porSrv.map(s => s.tickets));
+  const so1 = res.c1 - res.ambas, so2 = res.c2 - res.ambas, tt = Math.max(1, res.total);
+  const p1 = so1 / tt * 100, p2 = p1 + so2 / tt * 100;
+  const resps = [...new Set(L.flatMap(l => [l.r1, l.r2]).filter(Boolean).flatMap(x => x.split(' / ')))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  const top = [...TODOS].sort((a, b) => b._s - a._s).slice(0, 10);
+  $('#v-dash').innerHTML = `
+    
+    ${avisos.length ? `<div class="warn"><b>Pontos de atenção na importação:</b><ul>${avisos.map(a => `<li>${esc(a)}</li>`).join('')}</ul></div>` : ''}
+    <div class="kpis">
+      <div class="panel kpi hl"><span>Total de clientes</span><b>${fmt(res.total)}</b></div>
+      <div class="panel kpi"><span>Tickets de serviço</span><b>${fmt(tsv)}</b></div>
+      <div class="panel kpi"><span>Fase 1</span><b>${fmt(res.c1)}</b></div>
+      <div class="panel kpi"><span>Fase 2</span><b>${fmt(res.c2)}</b></div>
+      <div class="panel kpi"><span>Serviços</span><b>${cons.servicos.length}</b></div>
+    </div>
+    <div class="g2">
+      <div class="panel"><h2>Tickets por serviço <small>total ${fmt(tsv)} · clique para ver os clientes</small></h2>
+        <div style="max-height:380px;overflow-y:auto">${res.porSrv.map((s, i) => `<div class="br" data-s="${i}" title="${esc(s.nome)}: ${fmt(s.tickets)} tickets"><span class="bl">${esc(s.nome)}</span><div class="bt"><div class="bf" style="width:${s.tickets / smax * 100}%"></div></div><b>${fmt(s.tickets)}</b></div>`).join('') || '<p class="note">Sem serviços.</p>'}</div></div>
+      <div class="panel"><h2>Distribuição das implantações</h2><div class="donut">
+        <div class="ring" style="background:conic-gradient(var(--acc) 0 ${p1}%,var(--acc2) ${p1}% ${p2}%,#8aa0c8 ${p2}% 100%)"></div>
+        <div class="dl"><div><span class="dot" style="background:var(--acc)"></span>Somente Fase 1<b>${fmt(so1)}</b></div><div><span class="dot" style="background:var(--acc2)"></span>Somente Fase 2<b>${fmt(so2)}</b></div><div><span class="dot" style="background:#8aa0c8"></span>Fase 1 + Fase 2<b>${fmt(res.ambas)}</b></div></div></div></div>
+    </div>
+    <div class="panel" id="svcDet" hidden style="margin-bottom:20px"></div>
+    <div class="g3">
+      <div class="panel"><h2>Tickets por responsável <small>tickets de serviço, pela fase do cliente</small></h2><div class="lg"><span><span class="dot" style="background:var(--acc)"></span>Fase 1</span><span><span class="dot" style="background:var(--acc2)"></span>Fase 2</span></div>
+        <div style="max-height:360px;overflow-y:auto">${rlist.map(([n, v]) => `<div class="rr" title="${esc(n)} — Fase 1: ${fmt(v.f1)} · Fase 2: ${fmt(v.f2)}"><span class="bl">${esc(n)}</span><div>
+          <div class="v"><div class="bt"><div class="bf" style="width:${v.f1 / rmax * 100}%"></div></div><i>${fmt(v.f1)}</i></div>
+          <div class="v"><div class="bt"><div class="bf b" style="width:${v.f2 / rmax * 100}%"></div></div><i>${fmt(v.f2)}</i></div></div></div>`).join('')}</div></div>
+      <div class="panel"><h2>Clientes com mais tickets <small>de serviço</small></h2><div class="tw"><table><thead><tr><th>Cliente</th><th>Fase</th><th>Responsável</th><th class="n">Tickets</th></tr></thead><tbody>
+        ${top.map(l => `<tr class="cl" data-i="${l._i}"><td>${esc(l.nome)}</td><td>${l.fase}</td><td>${esc(resp(l))}</td><td class="n">${fmt(l._s)}</td></tr>`).join('')}</tbody></table></div></div>
+    </div>
+    <div class="panel" style="margin-bottom:20px"><h2>Serviços por CNPJ <small>todos os CNPJs da planilha de serviços</small></h2>
+      <div class="fl"><input type="search" id="qs" placeholder="🔎 Buscar CNPJ ou cliente"></div>
+      <div class="tw s" style="max-height:420px"><table><thead><tr><th>CNPJ</th><th>Cliente</th><th>Fase</th><th>Serviços (tickets)</th><th class="n">Total</th></tr></thead><tbody id="tsv"></tbody></table></div>
+      <p class="note" id="csv"></p></div>
+    <div class="panel"><h2>Clientes</h2>
+      <div class="fl"><input type="search" id="q" placeholder="🔎 Buscar cliente ou CNPJ">
+        <select id="ff"><option value="">Fase: todas</option><option>Fase 1</option><option>Fase 2</option><option>Fase 1 + Fase 2</option></select>
+        <select id="fr"><option value="">Responsável: todos</option>${resps.map(r => `<option>${esc(r)}</option>`).join('')}</select>
+        <select id="fs"><option value="">Serviço: todos</option>${cons.servicos.map((s, i) => `<option value="${i}">${esc(s)}</option>`).join('')}</select>
+        <input type="number" id="fm" min="0" placeholder="Tickets mín."></div>
+      <div class="tw"><table><thead><tr><th>CNPJ</th><th>Nome da organização</th><th>Fase</th><th>Resp. Fase 1</th><th class="n">Tickets F1</th><th>Resp. Fase 2</th><th class="n">Tickets F2</th><th class="n">Total impl.</th><th class="n">Tickets de serviço</th></tr></thead><tbody id="tb"></tbody></table></div>
+      <p class="note" id="cnt"></p></div>`;
+  $('#v-dash').querySelectorAll('.br').forEach(r => r.onclick = () => { svcSel = +r.dataset.s; renderServico(); });
+  $('#v-dash').querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(TODOS[+r.dataset.i]));
+  ['q','ff','fr','fs','fm'].forEach(id => $('#' + id).oninput = renderTabela);
+  renderTabela(); renderSvcCnpj(); $('#qs').oninput = renderSvcCnpj;
+}
+
+function renderSvcCnpj(){
+  const q = normTexto($('#qs').value), qd = $('#qs').value.replace(/\D/g, '');
+  const rows = TODOS.filter(l => l._s > 0 && (!q || normTexto(l.nome).includes(q) || (qd && l._c.includes(qd)))).sort((a, b) => b._s - a._s);
+  $('#tsv').innerHTML = rows.slice(0, 300).map(l => `<tr class="cl" data-i="${l._i}"><td>${esc(l.cnpj)}</td><td>${esc(l.nome)}</td><td>${l.fase}</td><td style="white-space:normal;min-width:340px">${D.cons.servicos.map((n, i) => ({n, v:l.srv[i]})).filter(x => x.v > 0).sort((a, b) => b.v - a.v).map(x => `${esc(x.n)}: <b>${fmt(x.v)}</b>`).join(' · ')}</td><td class="n"><b>${fmt(l._s)}</b></td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--mute)">Nenhum CNPJ encontrado.</td></tr>';
+  $('#csv').textContent = `Mostrando ${Math.min(rows.length, 300)} de ${fmt(rows.length)} CNPJs` + (rows.length > 300 ? ' — refine a busca para ver os demais.' : '.');
+  $('#tsv').querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(TODOS[+r.dataset.i]));
+}
+
+function renderTabela(){
+  const L = D.cons.linhas, q = normTexto($('#q').value), qd = $('#q').value.replace(/\D/g, '');
+  const ff = $('#ff').value, fr = $('#fr').value, fs = $('#fs').value, fm = parseFloat($('#fm').value) || 0;
+  const rows = L.filter(l =>
+    (!q || normTexto(l.nome).includes(q) || (qd && l._c.includes(qd))) &&
+    (!ff || l.fase === ff) &&
+    (!fr || l.r1.split(' / ').includes(fr) || l.r2.split(' / ').includes(fr)) &&
+    (!fs || l.srv[+fs] > 0) && l._s >= fm);
+  $('#tb').innerHTML = rows.slice(0, 300).map(l => `<tr class="cl" data-i="${l._i}"><td>${esc(l.cnpj)}</td><td>${esc(l.nome)}</td><td>${l.fase}</td><td>${esc(l.r1)}</td><td class="n">${fmt(l.t1)}</td><td>${esc(l.r2)}</td><td class="n">${fmt(l.t2)}</td><td class="n">${fmt(l.total)}</td><td class="n"><b>${fmt(l._s)}</b></td></tr>`).join('')
+    || '<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--mute)">Nenhum cliente encontrado com esses filtros.</td></tr>';
+  $('#cnt').textContent = `Mostrando ${Math.min(rows.length, 300)} de ${fmt(rows.length)} clientes` + (rows.length > 300 ? ' — refine a busca para ver os demais.' : '.');
+  $('#tb').querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(L[+r.dataset.i]));
+}
+
+function renderServico(){
+  const {cons, res} = D, s = res.porSrv[svcSel], idx = cons.servicos.indexOf(s.nome);
+  const rows = TODOS.filter(l => l.srv[idx] > 0).sort((a, b) => b.srv[idx] - a.srv[idx]);
+  const box = $('#svcDet'); box.hidden = false;
+  box.innerHTML = `<div class="mh"><h2>Clientes com tickets em ${esc(s.nome)} <small>${fmt(s.tickets)} tickets · ${fmt(rows.length)} clientes</small></h2><button class="link" id="x">Fechar</button></div>
+    <div class="tw s"><table><thead><tr><th>Cliente</th><th>CNPJ</th><th>Fase</th><th>Responsável</th><th class="n">Tickets</th></tr></thead><tbody>
+    ${rows.map(l => `<tr class="cl" data-i="${l._i}"><td>${esc(l.nome)}</td><td>${esc(l.cnpj)}</td><td>${l.fase}</td><td>${esc(resp(l))}</td><td class="n">${fmt(l.srv[idx])}</td></tr>`).join('')}</tbody></table></div>`;
+  $('#x').onclick = () => { box.hidden = true; svcSel = null; document.querySelectorAll('.br').forEach(r => r.classList.remove('sel')); };
+  box.querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(TODOS[+r.dataset.i]));
+  document.querySelectorAll('.br').forEach(r => r.classList.toggle('sel', +r.dataset.s === svcSel));
+  box.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function abrirDetalhe(l){
+  const srv = D.cons.servicos.map((n, i) => ({n, v:l.srv[i]})).filter(x => x.v > 0).sort((a, b) => b.v - a.v), m = $('#modal');
+  m.hidden = false;
+  m.innerHTML = `<div class="panel"><div class="mh"><div><h2 style="font-size:19px;margin:0">${esc(l.nome)}</h2><div class="note" style="margin:2px 0 0">CNPJ: <code>${esc(l.cnpj)}</code> · <span class="tags">${l.fase}</span></div></div><button class="link" id="mx">Fechar</button></div>
+    <div class="mg"><div><small>Fase 1 — responsável</small><b>${esc(l.r1) || '—'}</b></div><div><small>Tickets Fase 1</small><b>${fmt(l.t1)}</b></div>
+    <div><small>Fase 2 — responsável</small><b>${esc(l.r2) || '—'}</b></div><div><small>Tickets Fase 2</small><b>${fmt(l.t2)}</b></div></div>
+    <p style="font-size:17px;margin:0 0 14px">Tickets de serviço: <b>${fmt(l._s)}</b> <span class="note">· implantação: ${fmt(l.total)}</span></p>
+    <h2>Tickets por serviço</h2>
+    ${srv.length ? `<div class="tw"><table><thead><tr><th>Serviço</th><th class="n">Tickets</th></tr></thead><tbody>${srv.map(x => `<tr><td>${esc(x.n)}</td><td class="n">${fmt(x.v)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="note">Nenhum ticket de serviço registrado para este cliente.</p>'}</div>`;
+  const fechar = () => { m.hidden = true; };
+  $('#mx').onclick = fechar; m.onclick = e => { if (e.target === m) fechar(); };
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').hidden = true; });
+
+iniciar();
+</script>
+</body>
+</html>
