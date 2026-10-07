@@ -135,6 +135,10 @@ function renderDash(){
         <div class="dl"><div><span class="dot" style="background:var(--acc)"></span>Somente Fase 1<b>${fmt(so1)}</b></div><div><span class="dot" style="background:var(--acc2)"></span>Somente Fase 2<b>${fmt(so2)}</b></div><div><span class="dot" style="background:#8aa0c8"></span>Fase 1 + Fase 2<b>${fmt(res.ambas)}</b></div></div></div></div>
     </div>
     <div class="panel" id="svcDet" hidden style="margin-bottom:20px"></div>
+    <div class="panel" style="margin-bottom:20px"><h2>Tickets por serviço por grupo <small id="gsum"></small></h2>
+      <div class="fl" id="gsel"><button class="btn p" data-g="geral">Geral</button><button class="btn" data-g="f1">Fase 1</button><button class="btn" data-g="f2">Fase 2</button><button class="btn" data-g="sem">Sem fase</button></div>
+      <div id="gbars" style="max-height:380px;overflow-y:auto"></div></div>
+    <div class="panel" id="grpDet" hidden style="margin-bottom:20px"></div>
     <div class="g3">
       <div class="panel"><h2>Tickets por responsável <small>tickets de serviço, pela fase do cliente</small></h2><div class="lg"><span><span class="dot" style="background:var(--acc)"></span>Fase 1</span><span><span class="dot" style="background:var(--acc2)"></span>Fase 2</span></div>
         <div style="max-height:360px;overflow-y:auto">${rlist.map(([n, v]) => `<div class="rr" title="${esc(n)} — Fase 1: ${fmt(v.f1)} · Fase 2: ${fmt(v.f2)}"><span class="bl">${esc(n)}</span><div>
@@ -159,6 +163,54 @@ function renderDash(){
   $('#v-dash').querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(TODOS[+r.dataset.i]));
   ['q','ff','fr','fs','fm'].forEach(id => $('#' + id).oninput = renderTabela);
   renderTabela(); renderSvcCnpj(); $('#qs').oninput = renderSvcCnpj;
+  document.querySelectorAll('#gsel button').forEach(b => b.onclick = () => renderGrupo(b.dataset.g)); renderGrupo('geral');
+}
+
+let GS = null;
+const FILTROS = {geral:l => true, f1:l => l._a, f2:l => l._b, sem:l => !l._a && !l._b};
+const NOME_GRUPO = {geral:'Geral', f1:'Fase 1', f2:'Fase 2', sem:'Sem fase'};
+function renderGrupo(g){
+  GS = {g, nome:null, key:'tickets', dir:-1};
+  $('#grpDet').hidden = true;
+  const rows = TODOS.filter(FILTROS[g]);
+  const lista = D.cons.servicos.map((n, i) => ({nome:n, tickets:rows.reduce((a, l) => a + l.srv[i], 0)})).filter(x => x.tickets > 0).sort((a, b) => b.tickets - a.tickets);
+  const total = lista.reduce((a, x) => a + x.tickets, 0), max = Math.max(1, ...lista.map(x => x.tickets));
+  document.querySelectorAll('#gsel button').forEach(b => b.className = 'btn' + (b.dataset.g === g ? ' p' : ''));
+  $('#gsum').textContent = `${fmt(rows.filter(l => l._s > 0).length)} CNPJs com tickets · total ${fmt(total)} · clique no serviço para ver os clientes`;
+  $('#gbars').innerHTML = lista.map((x, k) => `<div class="br" data-k="${k}" title="${esc(x.nome)}: ${fmt(x.tickets)} tickets"><span class="bl">${esc(x.nome)}</span><div class="bt"><div class="bf" style="width:${x.tickets / max * 100}%"></div></div><b>${fmt(x.tickets)}</b></div>`).join('') || '<p class="note">Nenhum ticket de serviço neste grupo.</p>';
+  $('#gbars').querySelectorAll('.br').forEach(r => r.onclick = () => {
+    GS.nome = lista[+r.dataset.k].nome; GS.key = 'tickets'; GS.dir = -1;
+    $('#gbars').querySelectorAll('.br').forEach(b => b.classList.toggle('gs', b === r));
+    renderGrupoDet(true);
+  });
+}
+
+function renderGrupoDet(rolar){
+  const {g, nome, key, dir} = GS, idx = D.cons.servicos.indexOf(nome), box = $('#grpDet');
+  const rows = TODOS.filter(FILTROS[g]).filter(l => l.srv[idx] > 0);
+  const total = rows.reduce((a, l) => a + l.srv[idx], 0);
+  const tem = l => (l._a || l._b) ? 0 : 1, fr = l => l._a && !l._b ? 0 : l._a ? 1 : l._b ? 2 : 3;
+  const cmp = {
+    cliente:(a, b) => tem(a) - tem(b) || a.nome.localeCompare(b.nome, 'pt-BR'),
+    fase:(a, b) => fr(a) - fr(b),
+    resp:(a, b) => { const x = resp(a), y = resp(b); return !x - !y || x.localeCompare(y, 'pt-BR'); },
+    tickets:(a, b) => a.srv[idx] - b.srv[idx]
+  }[key];
+  rows.sort((a, b) => dir * cmp(a, b) || b.srv[idx] - a.srv[idx]);
+  const faseHtml = l => (l._a && l._b) ? '<b style="color:var(--acc)">FASE 1</b> + <b style="color:var(--acc2)">FASE 2</b>'
+    : l._a ? '<b style="color:var(--acc)">FASE 1</b>' : l._b ? '<b style="color:var(--acc2)">FASE 2</b>' : '<b style="color:var(--ok)">CONCLUÍDO</b>';
+  const th = (k, t, c = '') => `<th class="${c}" data-o="${k}" style="cursor:pointer;user-select:none">${t}${key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
+  box.hidden = false;
+  box.innerHTML = `<div class="mh"><h2>Clientes com tickets em ${esc(nome)} <small>${NOME_GRUPO[g]} · ${fmt(total)} tickets · ${fmt(rows.length)} clientes</small></h2><button class="link" id="gx">Fechar</button></div>
+    <div class="tw s"><table><thead><tr>${th('cliente', 'Cliente')}<th>CNPJ</th>${th('fase', 'Fase')}${th('resp', 'Responsável')}${th('tickets', 'Tickets', 'n')}</tr></thead><tbody>
+    ${rows.map(l => `<tr class="cl" data-i="${l._i}"><td>${(l._a || l._b) ? esc(l.nome) : '<span style="color:var(--mute)">CLIENTE NÃO CONSTA EM IMPLANTAÇÃO</span>'}</td><td>${esc(l.cnpj)}</td><td>${faseHtml(l)}</td><td>${esc(resp(l)) || '—'}</td><td class="n">${fmt(l.srv[idx])}</td></tr>`).join('')}</tbody></table></div>`;
+  $('#gx').onclick = () => { box.hidden = true; $('#gbars').querySelectorAll('.br').forEach(b => b.classList.remove('gs')); };
+  box.querySelectorAll('th[data-o]').forEach(h => h.onclick = () => {
+    if (GS.key === h.dataset.o) GS.dir *= -1; else { GS.key = h.dataset.o; GS.dir = GS.key === 'tickets' ? -1 : 1; }
+    renderGrupoDet(false);
+  });
+  box.querySelectorAll('tr.cl').forEach(r => r.onclick = () => abrirDetalhe(TODOS[+r.dataset.i]));
+  if (rolar) box.scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
 function renderSvcCnpj(){
